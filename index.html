@@ -320,6 +320,21 @@
     .chat-area.visible { display: flex; }
   }
 
+  .chat-ctx-menu {
+    position: absolute; right: 12px; top: 56px;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 6px; z-index: 100; min-width: 180px;
+    display: none;
+  }
+  .chat-ctx-menu.open { display: block; }
+  .ctx-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px; cursor: pointer;
+    font-size: 14px; transition: background .15s;
+  }
+  .ctx-item:hover { background: var(--bg3); }
+  .ctx-item.danger { color: #f87171; }
+  .chat-header { position: relative; }
   .typing-indicator { display: flex; gap: 4px; padding: 8px 14px; }
   .typing-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--text3);
@@ -445,7 +460,10 @@
         <div class="header-actions">
           <button class="icon-btn" title="Звонок">📞</button>
           <button class="icon-btn" title="Видео">📹</button>
-          <button class="icon-btn" title="Поиск">🔍</button>
+          <button class="icon-btn" onclick="toggleChatMenu()" title="Меню">⋯</button>
+        </div>
+        <div class="chat-ctx-menu" id="chat-ctx-menu">
+          <div class="ctx-item danger" onclick="confirmDeleteChat()">🗑 Удалить чат</div>
         </div>
       </div>
       <div class="messages-area" id="messages-area"></div>
@@ -514,6 +532,18 @@
   </div>
 </div>
 
+<!-- MODAL: Delete Chat -->
+<div class="modal-overlay" id="delete-chat-modal">
+  <div class="modal">
+    <h3>Удалить чат?</h3>
+    <p style="font-size:14px;color:var(--text2);margin-bottom:4px;">Все сообщения будут удалены безвозвратно.</p>
+    <div class="modal-actions">
+      <button class="modal-btn secondary" onclick="closeModal('delete-chat-modal')">Отмена</button>
+      <button class="modal-btn primary" style="background:#f87171;border-color:#f87171;" onclick="deleteChatConfirmed()">Удалить</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: New Group -->
 <div class="modal-overlay" id="new-group-modal">
   <div class="modal">
@@ -542,7 +572,7 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
   signOut, onAuthStateChanged, updateProfile }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs,
-  addDoc, query, where, orderBy, onSnapshot, updateDoc, serverTimestamp, arrayUnion }
+  addDoc, query, where, orderBy, onSnapshot, updateDoc, serverTimestamp, arrayUnion, deleteDoc }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 // ═══════════════════════════════════════════════════
@@ -693,9 +723,13 @@ async function loadContacts() {
 function renderContacts() {
   const list = document.getElementById('contacts-list');
   list.innerHTML = contacts.length ? contacts.map(c=>`
-    <div class="contact-item" onclick="startChat('${c.uid}','${c.name}')">
+    <div class="contact-item">
       <div class="chat-avatar" style="background:${avatarColor(c.uid)};width:40px;height:40px;font-size:14px;">${initials(c.name)}</div>
-      <div><div style="font-size:14px;font-weight:500;">${c.name}</div><div style="font-size:12px;color:var(--text2);">${c.phone||''}</div></div>
+      <div style="flex:1;">
+        <div style="font-size:14px;font-weight:500;">${c.name}</div>
+        <div style="font-size:12px;color:var(--text2);">${c.phone||''}</div>
+      </div>
+      <button onclick="startChat('${c.uid}','${c.name}')" style="padding:6px 12px;background:var(--accent);border:none;border-radius:8px;color:#fff;font-family:var(--font);font-size:12px;cursor:pointer;">✉ Написать</button>
     </div>`).join('') : '<div style="text-align:center;color:var(--text3);padding:24px;font-size:13px;">Нет контактов</div>';
 }
 
@@ -771,7 +805,7 @@ function renderChatList(chats) {
     const color = avatarColor(uid2||c.id);
     const ini = initials(name);
     const unread = c.unread?.[currentUser.uid]||0;
-    return `<div class="chat-item${c.id===currentChatId?' active':''}" onclick="openChat('${c.id}','${c.type||'personal'}')">
+    return `<div class="chat-item${c.id===currentChatId?' active':''}" onclick="openChat('${c.id}','${c.type||'personal'}')" oncontextmenu="chatContextMenu(event,'${c.id}')">
       <div class="chat-avatar" style="background:${color};">${ini}${c.type!=='group'?'<div class="online-dot"></div>':''}</div>
       <div class="chat-info">
         <div class="chat-name">${name}</div>
@@ -780,6 +814,7 @@ function renderChatList(chats) {
       <div class="chat-meta">
         <div class="chat-time">${fmtTime(c.lastTime)}</div>
         ${unread>0?`<div class="unread-badge">${unread}</div>`:''}
+        <button onclick="event.stopPropagation();chatContextMenu(event,'${c.id}')" style="background:transparent;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:2px 4px;">⋯</button>
       </div>
     </div>`;
   }).join('');
@@ -946,6 +981,45 @@ window.createGroup = async () => {
   closeModal('new-group-modal');
   openChat(chatRef.id,'group');
 };
+
+// ─── DELETE CHAT ───────────────────────────────────
+let chatToDelete = null;
+window.chatContextMenu = (e, chatId) => {
+  e.preventDefault();
+  chatToDelete = chatId;
+  document.getElementById('delete-chat-modal').classList.add('open');
+};
+window.toggleChatMenu = () => {
+  chatToDelete = currentChatId;
+  document.getElementById('chat-ctx-menu').classList.toggle('open');
+};
+window.confirmDeleteChat = () => {
+  chatToDelete = currentChatId;
+  document.getElementById('chat-ctx-menu').classList.remove('open');
+  document.getElementById('delete-chat-modal').classList.add('open');
+};
+window.deleteChatConfirmed = async () => {
+  const idToDelete = chatToDelete || currentChatId;
+  if (!idToDelete) return;
+  closeModal('delete-chat-modal');
+  const msgsSnap = await getDocs(collection(db,'chats',idToDelete,'messages'));
+  await Promise.all(msgsSnap.docs.map(d => deleteDoc(d.ref)));
+  await deleteDoc(doc(db,'chats',idToDelete));
+  if (idToDelete === currentChatId) {
+    currentChatId = null;
+    document.getElementById('active-chat').classList.add('hidden');
+    document.getElementById('empty-state').classList.remove('hidden');
+    document.getElementById('sidebar').classList.remove('hidden');
+    document.getElementById('chat-area').classList.remove('visible');
+  }
+  chatToDelete = null;
+};
+document.addEventListener('click', ev => {
+  const menu = document.getElementById('chat-ctx-menu');
+  if (menu && !ev.target.closest('#chat-ctx-menu') && !ev.target.closest('[onclick="toggleChatMenu()"]')) {
+    menu.classList.remove('open');
+  }
+});
 
 // ─── EMOJI PICKER ──────────────────────────────────
 const EMOJIS = ['😀','😂','🥰','😍','🤩','😎','🥳','😊','😉','😋','🤔','😅','😭','😤','🤯','😱','🥺','😴','🤗','😇','👍','👎','❤️','🔥','✨','🎉','💯','👏','🙌','🤝','💪','🙏','👋','🤞','✌️','🫶','💬','📱','🎵','🎶','🌟','⭐','💫','🌈','🍕','🍔','☕','🎂','🎁','🚀'];
