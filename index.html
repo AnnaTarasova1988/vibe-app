@@ -573,6 +573,14 @@ const FC={apiKey:"AIzaSyAhD-Y2nf59Z9ESrIYqPRxTsuyXvX2LQEQ",authDomain:"vibe-e731
 const fba=initializeApp(FC);
 const auth=getAuth(fba);
 const db=getFirestore(fba);
+// TURN/STUN через Timeweb VPS для реальных звонков
+const ICE=[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'stun:185.177.216.236:3478'},
+  {urls:'turn:185.177.216.236:3478',username:'vibe',credential:'vibe2024secret'},
+  {urls:'turns:185.177.216.236:5349',username:'vibe',credential:'vibe2024secret'}
+];
 
 // ── INDEXED DB for media storage (base64 stays local, only URL ref in Firestore) ──
 // We store media in IndexedDB so it persists and doesn't disappear
@@ -854,7 +862,12 @@ function subMsgs(chatId){
         else if(mt==='audio'||mediaSrc.startsWith('data:audio'))cnt=`<audio class="maud" src="${mediaSrc}" controls></audio>`;
         else cnt=`<img class="mimg" src="${mediaSrc}" loading="lazy">`;
       }
-      if(m.text)cnt+=`<span>${m.text}</span>`;
+      // Show answer button for incoming calls
+      if(m.callId&&m.sender!==cu.uid){
+        cnt+=`<div style="margin-top:6px;"><button onclick="G.answerCall('${m.callId}','${m.callType||'audio'}')" style="padding:6px 14px;background:var(--gn);border:none;border-radius:8px;color:#000;font-size:12px;font-weight:600;cursor:pointer;">📞 Ответить</button></div>`;
+      }
+      if(m.text&&!m.callId)cnt+=`<span>${m.text}</span>`;
+      if(m.text&&m.callId)cnt+=`<span style="opacity:.7;font-size:12px;">${m.text}</span>`;
       const snl=(!me&&m.senderName)?`<div class="msn">${m.senderName}</div>`:'';
       html+=`<div class="mw ${me?'me':'ot'}">${snl}<div class="mb">${cnt}</div><div class="mt">${ft(m.time)}${me?' ✓✓':''}</div></div>`;
     }
@@ -1029,28 +1042,74 @@ G.sendVRec=async()=>{
   G.closeVR();
 };
 
-// CALLS
+// ── REAL WebRTC CALLS via Firestore signaling + TURN ──
+let pc=null,callDocId=null;
+
+async function setupPC(){
+  if(pc){pc.close();}
+  pc=new RTCPeerConnection({iceServers:ICE});
+  callStream?.getTracks().forEach(t=>pc.addTrack(t,callStream));
+  pc.ontrack=e=>{const rv=$('clremv');rv.srcObject=e.streams[0];rv.style.display='block';};
+  return pc;
+}
+
 G.call=async type=>{
   const nm=$('chn').textContent;
   $('clav').style.background=avc(nm);$('clav').textContent=ini(nm);
   $('clnm').textContent=nm;
   $('clst').textContent=type==='video'?'Видеовызов...':'Аудиовызов...';
   $('callsc').classList.add('on');
-  try{
-    callStream=await navigator.mediaDevices.getUserMedia({audio:true,video:type==='video'});
-    if(type==='video'){$('cllocv').srcObject=callStream;$('cllocv').style.display='block';}
-    $('clst').textContent='Ожидание ответа...';
-    setTimeout(()=>{if($('callsc').classList.contains('on'))$('clst').textContent='Собеседник недоступен';},5000);
-  }catch(e){$('clst').textContent='Нет доступа к микрофону/камере';}
+  try{callStream=await navigator.mediaDevices.getUserMedia({audio:true,video:type==='video'});}
+  catch(e){$('clst').textContent='Нет доступа к камере/микрофону';return;}
+  if(type==='video'){$('cllocv').srcObject=callStream;$('cllocv').style.display='block';}
+  await setupPC();
+  const callRef=doc(collection(db,'calls'));
+  callDocId=callRef.id;
+  const offerC=collection(callRef,'offerCandidates');
+  const answerC=collection(callRef,'answerCandidates');
+  pc.onicecandidate=e=>{if(e.candidate)addDoc(offerC,e.candidate.toJSON());};
+  const offer=await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await setDoc(callRef,{offer:{type:offer.type,sdp:offer.sdp},callType:type,caller:cu.uid,callerName:cu.displayName,chatId:G.cid,createdAt:serverTimestamp()});
+  await doSend({text:'📞 '+(type==='video'?'Видеозвонок':'Аудиозвонок')+' | Принять: нажмите кнопку звонка',callId:callDocId,callType:type});
+  $('clst').textContent='Ожидание ответа...';
+  onSnapshot(callRef,async snap=>{
+    const d=snap.data();
+    if(d?.answer&&pc&&pc.signalingState!=='stable')try{await pc.setRemoteDescription(new RTCSessionDescription(d.answer));$('clst').textContent=type==='video'?'Видеозвонок':'Аудиозвонок';}catch(e){}
+    if(d?.ended&&d.caller!==cu.uid)G.endCall();
+  });
+  onSnapshot(answerC,snap=>{snap.docChanges().forEach(ch=>{if(ch.type==='added'&&pc)pc.addIceCandidate(new RTCIceCandidate(ch.doc.data())).catch(()=>{});});});
+  setTimeout(()=>{if($('clst').textContent.includes('Ожидание'))$('clst').textContent='Нет ответа';},30000);
 };
-G.endCall=()=>{
-  if(callStream)callStream.getTracks().forEach(t=>t.stop());
-  callStream=null;
+
+G.answerCall=async(cid,type)=>{
+  $('clst').textContent='Соединяемся...';$('callsc').classList.add('on');
+  try{callStream=await navigator.mediaDevices.getUserMedia({audio:true,video:type==='video'});}catch(e){return;}
+  if(type==='video'){$('cllocv').srcObject=callStream;$('cllocv').style.display='block';}
+  callDocId=cid;await setupPC();
+  const callRef=doc(db,'calls',cid);
+  const offerC=collection(callRef,'offerCandidates');
+  const answerC=collection(callRef,'answerCandidates');
+  pc.onicecandidate=e=>{if(e.candidate)addDoc(answerC,e.candidate.toJSON());};
+  const cd=(await getDoc(callRef)).data();
+  await pc.setRemoteDescription(new RTCSessionDescription(cd.offer));
+  const answer=await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await updateDoc(callRef,{answer:{type:answer.type,sdp:answer.sdp}});
+  onSnapshot(offerC,snap=>{snap.docChanges().forEach(ch=>{if(ch.type==='added'&&pc)pc.addIceCandidate(new RTCIceCandidate(ch.doc.data())).catch(()=>{});});});
+  $('clst').textContent=type==='video'?'Видеозвонок':'Аудиозвонок';
+};
+
+G.endCall=async()=>{
+  if(pc){pc.close();pc=null;}
+  if(callStream){callStream.getTracks().forEach(t=>t.stop());callStream=null;}
+  if(callDocId){try{await updateDoc(doc(db,'calls',callDocId),{ended:true});}catch(e){}}
+  callDocId=null;
   $('callsc').classList.remove('on');
-  $('cllocv').style.display='none';
+  $('cllocv').style.display='none';$('clremv').style.display='none';
 };
-G.toggleMute=()=>{if(callStream){const t=callStream.getAudioTracks()[0];if(t)t.enabled=!t.enabled;}};
-G.toggleCam=()=>{if(callStream){const t=callStream.getVideoTracks()[0];if(t)t.enabled=!t.enabled;}};
+G.toggleMute=()=>{if(callStream){const t=callStream.getAudioTracks()[0];if(t){t.enabled=!t.enabled;$('btnmut').style.opacity=t.enabled?'1':'.4';}}};
+G.toggleCam=()=>{if(callStream){const t=callStream.getVideoTracks()[0];if(t){t.enabled=!t.enabled;$('btncam').style.opacity=t.enabled?'1':'.4';}}};
 G.toggleSpk=()=>{};
 
 // EMOJI
